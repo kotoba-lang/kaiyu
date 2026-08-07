@@ -1,0 +1,8 @@
+(ns run-tests
+  (:require [clojure.test :as t]
+            [kaiyu.core-test]
+            [kaiyu.session-test]))
+
+(defn -main [& _]
+  (let [{:keys [fail error]} (t/run-tests 'kaiyu.core-test 'kaiyu.session-test)]
+    (System/exit (if (pos? (+ fail error)) 1 0))))
