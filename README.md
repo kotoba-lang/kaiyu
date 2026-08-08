@@ -13,6 +13,7 @@ from counters alone:
 |---|---|
 | `kaiyu.core` | dwell buckets, acquisition buckets, route normalization (whitelist), transition edges, report windows, `collected-since` semantics |
 | `kaiyu.session` | the browser-side accounting, as a pure reducer: `(step state event) -> [state' emissions]` |
+| `kaiyu.diagnose` | what a report SAYS is wrong — ranked findings, each a question a human can answer |
 
 `kaiyu.session` takes exactly one choice from its host, `:on-hide`:
 
@@ -94,6 +95,25 @@ exists to hold.
 ;;           {:t :dwell :route "video" :bucket "180_plus"}]]
 ```
 
+## Judgment is separate, and refuses to run on a doubtful instrument
+
+`kaiyu.diagnose` turns a report into ranked findings (bounce, dead end,
+unreached page, single-channel arrival). Two rules make it usable by a loop:
+
+- **Measurement findings short-circuit.** If any section is `:not-measured`
+  over a window the site was live for, the site findings are not reported at
+  all — not sorted below, not included. Reporting both invites acting on the
+  ones that are easier to act on, which are exactly the ones that might be
+  artefacts of a broken read.
+- **A finding is a question, never a remedy.** The data is counts and dates
+  with no visitor identity, so it can locate where attention stops and where it
+  never arrives; it cannot say why. `->issue` writes that limitation into the
+  issue body.
+
+`top-finding` returns nil when there is nothing to say. A loop must treat that
+as a valid round — one that must file an issue every round files noise on the
+rounds when the site is fine, and noise is what makes a queue unread.
+
 ## `collected-since` is not decoration
 
 An empty section means one of three things, and a report that cannot tell them
@@ -143,6 +163,6 @@ instead of being discovered when two products stop being comparable.
 ## Tests
 
 ```bash
-npx nbb --classpath src:test test/run_tests.cljs   # 19 tests / 107 assertions
+npx nbb --classpath src:test test/run_tests.cljs   # 31 tests / 140 assertions
 clojure -M:test                                    # same suite on the JVM
 ```
