@@ -116,3 +116,21 @@
     (let [out (run [{:type :navigate :to "home" :now 0 :vocabulary routes}
                     {:type :end :now (* 95 sec)}])]
       (is (= [{:t :dwell :route "home" :bucket "60_179"}] out)))))
+
+(deftest blur-pauses-the-clock-without-ending-the-read
+  (testing "a window that loses focus while still visible is not attention, but
+            it is not the end of a read either — emitting there would split one
+            read into a row per glance away"
+    (let [out (run [{:type :navigate :to "video" :now 0 :vocabulary routes}
+                    {:type :pause :now (* 20 sec)}
+                    {:type :resume :now (* 500 sec)}
+                    {:type :end :now (* 520 sec)}])]
+      (is (= [{:t :dwell :route "video" :bucket "30_59"}] out)
+          "20s + 20s = 40s in ONE row; the 8 idle minutes are in neither")))
+  (testing "a resume after the view was closed does not restart a closed clock"
+    (let [out (run [{:type :navigate :to "video" :now 0 :vocabulary routes}
+                    {:type :end :now (* 5 sec)}
+                    {:type :resume :now (* 10 sec)}
+                    {:type :end :now (* 90 sec)}])]
+      (is (= [{:t :dwell :route "video" :bucket "lt10"}] out)
+          "one row, and the 80s after the page was gone are not attention"))))

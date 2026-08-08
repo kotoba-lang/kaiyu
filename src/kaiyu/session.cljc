@@ -84,8 +84,10 @@
 
   Events:
     `{:type :navigate :to r :now n}`  — the app moved to view `r`
-    `{:type :hide :now n}`            — tab hidden or window blurred
-    `{:type :show :now n}`            — tab visible AND focused again
+    `{:type :hide :now n}`            — tab hidden (see `hide-behaviours`)
+    `{:type :show :now n}`            — tab visible again
+    `{:type :pause :now n}`           — clock off, no emission (window blurred)
+    `{:type :resume :now n}`          — clock on again
     `{:type :end :now n}`             — pagehide / unload
 
   Time never accrues while hidden, under either `:on-hide`. What differs is
@@ -113,6 +115,13 @@
     :show  (if (:closed? state)
              [(assoc state :since now :active-seconds 0 :closed? false) []]
              [(assoc state :since now) []])
+
+    ;; Clock-only, no emission. A window that loses focus while still visible
+    ;; is not attention, but it is also not the END of a period of attention —
+    ;; the reader is still looking at the page, they are just typing somewhere
+    ;; else. Emitting there would split one read into a row per glance away.
+    :pause  [(accrue state now) []]
+    :resume [(if (:closed? state) state (assoc state :since now)) []]
 
     :end   (close-view state now)
 

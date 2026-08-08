@@ -143,6 +143,6 @@ instead of being discovered when two products stop being comparable.
 ## Tests
 
 ```bash
-npx nbb --classpath src:test test/run_tests.cljs   # 18 tests / 105 assertions
+npx nbb --classpath src:test test/run_tests.cljs   # 19 tests / 107 assertions
 clojure -M:test                                    # same suite on the JVM
 ```
