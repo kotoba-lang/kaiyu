@@ -14,6 +14,19 @@ from counters alone:
 | `kaiyu.core` | dwell buckets, acquisition buckets, route normalization (whitelist), transition edges, report windows, `collected-since` semantics |
 | `kaiyu.session` | the browser-side accounting, as a pure reducer: `(step state event) -> [state' emissions]` |
 
+`kaiyu.session` takes exactly one choice from its host, `:on-hide`:
+
+- **`:close`** (default) — a tab-hide closes the view out and emits its dwell;
+  returning starts a fresh segment with its own row. **One row = one
+  uninterrupted period of attention.**
+- **`:pause`** — hiding only stops the clock; one row is emitted when the view
+  is finally left. **One row = total attention on that view visit.**
+
+Time never accrues while hidden under either. The default is `:close` because
+that is what the existing rows in club-shinshi-app and net-babiniku already
+mean — extracting a library is not a licence to redefine data that has already
+been collected.
+
 Storage and transport stay with the host — a Worker writing D1 rows, a Pages
 Function, a browser sending a beacon. The *vocabulary* does not, because two
 sites that pick their own bucket boundaries produce numbers that look
@@ -130,6 +143,6 @@ instead of being discovered when two products stop being comparable.
 ## Tests
 
 ```bash
-npx nbb --classpath src:test test/run_tests.cljs   # 17 tests / 101 assertions
+npx nbb --classpath src:test test/run_tests.cljs   # 18 tests / 105 assertions
 clojure -M:test                                    # same suite on the JVM
 ```

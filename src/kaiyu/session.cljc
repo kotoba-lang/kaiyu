@@ -9,9 +9,11 @@
 
   - **counting time in a background tab.** A page left open overnight reports
     a night of attention that nobody paid.
-  - **counting a tab return as the same view.** Leaving and coming back is two
-    periods of attention; treating it as one loses the reading that happened
-    after the return, which on a text-heavy page is most of it.
+  - **losing the reading that happens after a tab return.** Leaving and coming
+    back is two periods of attention. Both shipped implementations close the
+    first out and start a fresh one; carrying the old seconds forward instead
+    would double-count them into the next row. Which of the two a row MEANS is
+    the `:on-hide` choice below — the one thing here a host may pick.
   - **double-reporting on close.** `pagehide` can fire after a route change
     already closed the view out, and fires more than once in some browsers.
   - **counting a re-entry as navigation.** Selecting the view already showing
@@ -24,14 +26,37 @@
   comments."
   (:require [kaiyu.core :as kaiyu]))
 
+(def hide-behaviours
+  "What a tab-hide means for the dwell row, and therefore what one row IS.
+
+  `:close` — hiding CLOSES the view out and emits its dwell; coming back starts
+  a fresh segment that will emit its own row. One row = one uninterrupted
+  period of attention. This is what club-shinshi-app and net-babiniku both
+  shipped, and what ADR-2608060900 describes as 『新しい注視セグメントとして
+  計り直す』.
+
+  `:pause` — hiding only stops the clock; the accrued seconds carry over and
+  one row is emitted when the view is finally left. One row = total attention
+  on that view visit.
+
+  Both are defensible and they answer different questions, so the library takes
+  a side only in the default: `:close`, because that is what the existing rows
+  in both products mean, and a library that silently redefined them would make
+  historical and new rows incomparable — the exact failure the shared
+  vocabulary exists to prevent."
+  #{:close :pause})
+
 (defn init
   "Initial state. `now-ms` is wall clock; `route` may be nil until the first
-  navigation."
-  [now-ms route]
-  {:route route
-   :active-seconds 0
-   :since now-ms          ; when the current attention segment started, nil when paused
-   :closed? (nil? route)})
+  navigation. `opts` takes `:on-hide` (see `hide-behaviours`, default
+  `:close`)."
+  ([now-ms route] (init now-ms route {}))
+  ([now-ms route {:keys [on-hide] :or {on-hide :close}}]
+   {:route route
+    :active-seconds 0
+    :since now-ms          ; when the current attention segment started, nil when paused
+    :on-hide (if (contains? hide-behaviours on-hide) on-hide :close)
+    :closed? (nil? route)}))
 
 (defn- accrue
   "Fold elapsed wall time into the active total and stop the clock."
@@ -63,9 +88,8 @@
     `{:type :show :now n}`            — tab visible AND focused again
     `{:type :end :now n}`             — pagehide / unload
 
-  `:show` starts a NEW attention segment on the same view rather than resuming
-  the old one — the accrued seconds carry over, but the clock restarts, so the
-  gap while the tab was elsewhere is not counted."
+  Time never accrues while hidden, under either `:on-hide`. What differs is
+  whether hiding also EMITS: see `hide-behaviours`."
   [state {:keys [type to now vocabulary]}]
   (case type
     :navigate
@@ -78,9 +102,17 @@
           [(assoc state :route to :active-seconds 0 :since now :closed? false)
            (into (vec closes) (when edge [{:t :nav :from (:from edge) :to (:to edge)}]))])))
 
-    :hide  [(accrue state now) []]
+    ;; `:close` emits the segment now; `:pause` only stops the clock. See
+    ;; hide-behaviours for why this is a choice and not a bug.
+    :hide  (if (= :pause (:on-hide state))
+             [(accrue state now) []]
+             (close-view state now))
 
-    :show  [(assoc state :since now) []]
+    ;; After a `:close`, coming back must start a fresh segment — carrying the
+    ;; old seconds forward would double-count them into the next row.
+    :show  (if (:closed? state)
+             [(assoc state :since now :active-seconds 0 :closed? false) []]
+             [(assoc state :since now) []])
 
     :end   (close-view state now)
 

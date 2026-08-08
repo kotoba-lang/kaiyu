@@ -14,23 +14,52 @@
 (def ^:private sec 1000)
 
 (deftest a-background-tab-does-not-accrue-attention
-  (testing "a page left open overnight must not report a night of attention"
+  (testing "a page left open overnight must not report a night of attention,
+            under either hide behaviour"
     (let [out (run [{:type :navigate :to "video" :now 0 :vocabulary routes}
                     {:type :hide :now (* 5 sec)}
                     ;; eight hours in a background tab
                     {:type :show :now (* 28805 sec)}
                     {:type :end :now (* 28810 sec)}])]
+      (is (= [{:t :dwell :route "video" :bucket "lt10"}
+              {:t :dwell :route "video" :bucket "lt10"}] out)
+          "two 5s segments, not eight hours"))
+    (let [out (second (session/drive (session/init 0 nil {:on-hide :pause})
+                                     [{:type :navigate :to "video" :now 0 :vocabulary routes}
+                                      {:type :hide :now (* 5 sec)}
+                                      {:type :show :now (* 28805 sec)}
+                                      {:type :end :now (* 28810 sec)}]))]
       (is (= [{:t :dwell :route "video" :bucket "10_29"}] out)
-          "5s before hiding + 5s after returning = 10s of attention, not 8 hours"))))
+          "5s + 5s = 10s in one row, still not eight hours"))))
 
-(deftest returning-to-a-tab-starts-a-new-attention-segment
-  (testing "the reading that happens after coming back is most of the reading"
+(deftest a-tab-return-is-a-new-row-by-default
+  (testing "`:close` is the default because it is what club-shinshi-app and
+            net-babiniku both shipped — one row = one uninterrupted period of
+            attention. A library that quietly redefined this would make their
+            existing rows incomparable with new ones."
     (let [out (run [{:type :navigate :to "video" :now 0 :vocabulary routes}
                     {:type :hide :now (* 2 sec)}
                     {:type :show :now (* 600 sec)}
                     {:type :end :now (* 640 sec)}])]
-      (is (= [{:t :dwell :route "video" :bucket "30_59"}] out)
-          "2s + 40s = 42s; counting the 10 idle minutes would say 180_plus"))))
+      (is (= [{:t :dwell :route "video" :bucket "lt10"}
+              {:t :dwell :route "video" :bucket "30_59"}] out)
+          "a 2s segment and a 40s segment; the 10 idle minutes are in neither")))
+  (testing "`:pause` answers the other question — total attention on the visit"
+    (let [out (second (session/drive (session/init 0 nil {:on-hide :pause})
+                                     [{:type :navigate :to "video" :now 0 :vocabulary routes}
+                                      {:type :hide :now (* 2 sec)}
+                                      {:type :show :now (* 600 sec)}
+                                      {:type :end :now (* 640 sec)}]))]
+      (is (= [{:t :dwell :route "video" :bucket "30_59"}] out) "2s + 40s = 42s in one row")))
+  (testing "an unknown behaviour falls back to the default rather than to nil"
+    (is (= :close (:on-hide (session/init 0 nil {:on-hide :whatever}))))))
+
+(deftest a-hidden-tab-that-never-returns-still-reports
+  (testing "under :close the row is emitted at hide time, so a tab killed in
+            the background is not silently lost"
+    (let [out (run [{:type :navigate :to "video" :now 0 :vocabulary routes}
+                    {:type :hide :now (* 45 sec)}])]
+      (is (= [{:t :dwell :route "video" :bucket "30_59"}] out)))))
 
 (deftest closing-twice-reports-once
   (testing "pagehide can fire after a route change already closed the view out,
