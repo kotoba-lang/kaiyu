@@ -127,6 +127,47 @@
     (is (re-find #"\*\*なぜ\*\*は分からない" (:body issue))
         "the issue says out loud which question the measurement cannot answer")
     (is (re-find #"kaizen:example\.test:" (:id issue)))
+    (is (re-find #"根拠の範囲: この window 全体" (:body issue))
+        "a fully measured section says so, so the caveated case reads as different")
     (testing "the id is stable for the same finding in the same window, so a
               loop re-running does not open a second issue for one thing"
       (is (= (:id issue) (:id (dx/->issue d (dx/top-finding d))))))))
+
+(deftest a-finding-off-a-partial-section-says-how-little-it-covers
+  (testing "babiniku.net 2026-08-11: eight home→chat edges, every one of them
+            recorded on the last day of the window, because that was the first
+            day the beacon produced a row. The numbers are real; a body that
+            calls them a week is not."
+    (let [d (dx/diagnose (-> (report {:dwell [{:route "video" :bucket "60_179" :count 30}]
+                                      :visits [{:source "search" :count 20}
+                                               {:source "direct" :count 18}]})
+                             (assoc-in [:sections :transitions]
+                                       (kaiyu/section win [{:from "home" :to "chat" :count 8}]
+                                                      "2026-08-08"))))
+          top (dx/top-finding d)
+          issue (dx/->issue d top)]
+      (is (= :kaiyu.journey/dead-end-chat (:id top))
+          "the rule still fires — gating it on :measured is a product decision, not this test's")
+      (is (= [:transitions] (:sections top)) "the finding carries where it came from")
+      (is (= {:state :partial :collected-since "2026-08-08"}
+             (get-in d [:coverage :transitions])))
+      (is (re-find #"2026-08-08 以降のみ" (:body issue))
+          "the body names the day the evidence actually starts")
+      (is (re-find #"window 全体の話として読まないこと" (:body issue))
+          "and says plainly not to read it as the whole window"))))
+
+(deftest a-suppressed-blocked-finding-does-not-silently-become-a-measured-one
+  (testing "a site that went live inside the window has its :not-measured
+            section suppressed as a fault — correctly — but the site rules keep
+            reading its rows, so the issue must not claim a known span"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-06"
+                                      :dwell [{:route "video" :bucket "60_179" :count 30}]
+                                      :visits [{:source "search" :count 20}
+                                               {:source "direct" :count 18}]})
+                             (assoc-in [:sections :transitions]
+                                       (kaiyu/section win [{:from "home" :to "chat" :count 8}] nil))))
+          dead-end (first (filter #(= :kaiyu.journey/dead-end-chat (:id %)) (:findings d)))]
+      (is (not (:blocked? d)))
+      (is (some? dead-end) "the site rule reads rows from a :not-measured section")
+      (is (re-find #"根拠の範囲: \*\*不明\*\*" (:body (dx/->issue d dead-end)))
+          "an unknown boundary is stated as unknown, never as the window"))))
