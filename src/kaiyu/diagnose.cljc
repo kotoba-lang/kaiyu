@@ -171,6 +171,17 @@
                          [:transitions :dwell])))
          vec)))
 
+(defn share-pct
+  "`count` of `total` as a whole percent, floored.
+
+  Rounding reads 4756 of 4775 as 100%, and 100% is a claim these numbers do not
+  make: the 19 visits it rounds away are the whole of what the question asks
+  (「この入口が止まったときに残るものがあるか」). Flooring can only understate a
+  share, so a title reaches 100% only when the tail really is empty and never
+  answers the question ahead of the reader."
+  [count total]
+  (int (Math/floor (* 100.0 (/ (double count) total)))))
+
 (defn entry-concentration-findings
   "One arrival bucket carrying nearly everything.
 
@@ -185,7 +196,7 @@
         (when (>= (/ (double count) total) threshold)
           [(finding (keyword "kaiyu.acquisition" (str "single-channel-" source))
                     :medium
-                    (str "到達の " (Math/round (* 100.0 (/ (double count) total))) "% が「" source "」")
+                    (str "到達の " (share-pct count total) "% が「" source "」")
                     (str total " 件中 " count " 件が 1 つの入口。"
                          "この入口が止まったときに残るものがあるか。")
                     {:source source :visits count :total total}

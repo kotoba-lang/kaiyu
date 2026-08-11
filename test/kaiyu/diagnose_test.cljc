@@ -97,6 +97,22 @@
                                                                     {:source "direct" :count 35}
                                                                     {:source "social" :count 30}]})))))))))
 
+(deftest a-title-never-rounds-the-tail-away
+  (testing "itonami.cloud 2026-08-05〜08-11: 4756 of 4775 is 99.6%, and the 19
+            visits a rounded title erases are exactly the ones the question is
+            asking about"
+    (let [d (dx/diagnose (report {:visits [{:source "direct" :count 4756}
+                                           {:source "search" :count 10}
+                                           {:source "referral" :count 8}
+                                           {:source "campaign" :count 1}]}))
+          f (first (filter #(= "kaiyu.acquisition" (namespace (:id %))) (:findings d)))]
+      (is (some? f))
+      (is (= "到達の 99% が「direct」" (:title f)))))
+  (testing "100% is kept for a share that really is everything"
+    (let [d (dx/diagnose (report {:visits [{:source "direct" :count 40}]}))
+          f (first (filter #(= "kaiyu.acquisition" (namespace (:id %))) (:findings d)))]
+      (is (= "到達の 100% が「direct」" (:title f))))))
+
 (deftest findings-are-ranked-so-a-loop-can-take-the-first
   (let [d (dx/diagnose (report {:dwell [{:route "pricing" :bucket "lt10" :count 40}]
                                 :transitions [{:from "home" :to "pricing" :count 12}]
