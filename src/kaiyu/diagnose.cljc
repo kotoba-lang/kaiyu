@@ -17,12 +17,29 @@
   ## The one rule that matters
 
   **Absence of rows is never evidence.** `kaiyu.core/measurement-state`
-  distinguishes `:not-measured` / `:partial` / `:measured`, and every rule here
-  refuses to fire on anything but `:measured`. The failure this prevents is the
-  expensive one: on 2026-08-07 `/_metrics/audience` answered 200 with zeros for
-  a day while the table held 595 pageviews, because every read threw and was
-  swallowed. A loop that judged that report would have filed 『誰も来ていない』
-  issues, and every one of them would have been about a broken read."
+  distinguishes `:not-measured` / `:partial` / `:measured`, and
+  `measurement-findings` refuses to read an empty section as a fact about
+  visitors. The failure this prevents is the expensive one: on 2026-08-07
+  `/_metrics/audience` answered 200 with zeros for a day while the table held
+  595 pageviews, because every read threw and was swallowed. A loop that judged
+  that report would have filed 『誰も来ていない』 issues, and every one of them
+  would have been about a broken read.
+
+  **What this does NOT do**, written down because the opposite claim stood here
+  until 2026-08-11 and was false: the four site rules receive `:rows` and never
+  see `:state`. They fire on a `:partial` section, and on a `:not-measured` one
+  whose `:blocked` finding was suppressed because the site went live inside the
+  window. The numbers they produce are real, but they describe a shorter period
+  than the window names — measured that day on babiniku.net, whose first-ever
+  candidate was a dead-end drawn from a single day of edges and labelled with a
+  seven-day window.
+
+  So every finding carries the `:sections` it drew on, `diagnose` returns
+  `:coverage`, and `->issue` prints the span the evidence is true within.
+  Whether a rule should fire on `:partial` at all is deliberately NOT settled
+  here: gating on `:measured` would silence three of four live sites until each
+  accumulates a full window, and choosing silence over a caveated number is a
+  product decision, not a library one."
   (:require [clojure.string :as str]
             [kaiyu.core :as kaiyu]))
 
@@ -35,8 +52,13 @@
 (def ^:private severity-rank (zipmap severities (range)))
 
 (defn- finding
-  [id severity title question evidence]
-  {:id id :severity severity :title title :question question :evidence evidence})
+  "`sections` are the report sections this finding was drawn from. They are
+  carried so `->issue` can state the span the evidence actually covers, which
+  is not the same as the span that was asked for: a rule reading a `:partial`
+  section produces real numbers about a shorter period than the window names."
+  [id severity title question evidence sections]
+  {:id id :severity severity :title title :question question :evidence evidence
+   :sections (vec sections)})
 
 ;; ───────────────────────── rules ─────────────────────────
 
@@ -60,7 +82,8 @@
                           "beacon が動いていないのか、読み取りが失敗しているのか、"
                           "本当に誰も来ていないのか——先にこれを決めないと、他の所見は読めない。")
                      {:section section :state state :collected-since collected-since
-                      :window window})
+                      :window window}
+                     [section])
 
             (and (= :measured state) (empty? rows))
             (finding (keyword "kaiyu.measurement" (str (name section) "-empty-while-measured"))
@@ -68,7 +91,8 @@
                      (str (name section) " は測れているのに 0 行")
                      (str "収集は " collected-since " から続いているのに、この window の行が 0。"
                           "計測は生きていて到達が無い、という読みでよいか。")
-                     {:section section :collected-since collected-since :window window})
+                     {:section section :collected-since collected-since :window window}
+                     [section])
 
             :else nil))
         sections))
@@ -96,7 +120,8 @@
                          (str n " 件の遷移がこの面に入り、出ていく辺が 1 件も無い。"
                               "ここで終わってよい面か（完了・退出が正しい面か）、"
                               "それとも次に行く先が見えていないのか。")
-                         {:route route :inbound n :outbound 0})))
+                         {:route route :inbound n :outbound 0}
+                         [:transitions])))
          vec)))
 
 (defn attention-findings
@@ -122,7 +147,8 @@
                               (str total " 件中 " shortest " 件が最短バケット。"
                                    "この面は来た人の問いに答えているか、"
                                    "答えていることが見えているか。")
-                              {:route route :samples total :under-10s shortest})))))
+                              {:route route :samples total :under-10s shortest}
+                              [:dwell])))))
          (sort-by (comp - :samples :evidence))
          vec)))
 
@@ -141,7 +167,8 @@
                          (str "「" route "」に誰も来ていない")
                          (str "この window で " route " への遷移も滞在も 1 件も無い。"
                               "導線が無いのか、要らない面なのか。")
-                         {:route route})))
+                         {:route route}
+                         [:transitions :dwell])))
          vec)))
 
 (defn entry-concentration-findings
@@ -161,9 +188,22 @@
                     (str "到達の " (Math/round (* 100.0 (/ (double count) total))) "% が「" source "」")
                     (str total " 件中 " count " 件が 1 つの入口。"
                          "この入口が止まったときに残るものがあるか。")
-                    {:source source :visits count :total total})])))))
+                    {:source source :visits count :total total}
+                    [:visits])])))))
 
 ;; ───────────────────────── entry point ─────────────────────────
+
+(defn coverage
+  "section → `{:state :collected-since}`, the boundary each section's rows are
+  true within.
+
+  Kept beside the findings rather than folded into them because a finding is a
+  question about the site and this is a fact about the instrument; a reader who
+  cannot see both is being asked to trust a number without its span."
+  [sections]
+  (reduce-kv (fn [m k {:keys [state collected-since]}]
+               (assoc m k {:state state :collected-since collected-since}))
+             {} (into {} sections)))
 
 (defn diagnose
   "A kaiyu report → ranked findings.
@@ -188,6 +228,7 @@
     (if (seq blocked)
       {:site (:site report)
        :window (:window report)
+       :coverage (coverage sections)
        :findings (vec (sort-by (comp severity-rank :severity) measurement))
        :blocked? true}
       (let [rows (fn [k] (get-in sections [k :rows] []))
@@ -200,6 +241,7 @@
                                               :dwell (rows :dwell)}))]
         {:site (:site report)
          :window (:window report)
+         :coverage (coverage sections)
          :findings (vec (sort-by (juxt (comp severity-rank :severity) :id) findings))
          :blocked? false}))))
 
@@ -211,23 +253,51 @@
   [diagnosis]
   (first (:findings diagnosis)))
 
+(def ^:private state-rank {:not-measured 0 :partial 1 :measured 2})
+
+(defn- coverage-line
+  "The 測ったこと line stating the span the evidence is actually true within.
+
+  Reports the WORST state among the sections the finding drew on: a finding
+  built from a fully measured section and a partial one is only as good as the
+  partial one. nil when there is nothing to say — a caller that built a
+  diagnosis by hand gets the old body rather than a fabricated boundary."
+  [window coverage sections]
+  (when-let [cs (seq (keep coverage sections))]
+    (let [worst (apply min-key (comp state-rank :state) cs)
+          since (:collected-since worst)]
+      (case (:state worst)
+        :measured
+        (str "- 根拠の範囲: この window 全体（" since " から測れている）")
+        :partial
+        (str "- 根拠の範囲: **" since " 以降のみ**。"
+             "window は " (:from window) " からだが、それ以前の行は無い。"
+             "この数字を window 全体の話として読まないこと")
+        :not-measured
+        (str "- 根拠の範囲: **不明**（収集開始日が記録されていない）。"
+             "この数字が何日分なのかは、この報告からは言えない")
+        nil))))
+
 (defn ->issue
   "A finding → the issue body a human reads in the queue.
 
   Deliberately not a fix. The data cannot say why, so an issue that proposed a
   remedy would be dressing a guess as an inference. It states what was
   measured, over what window, and the question to answer."
-  [{:keys [site window]} {:keys [id severity title question evidence]}]
+  [{:keys [site window coverage]} {:keys [id severity title question evidence sections]}]
   {:kind :kaizen/open-issue
    :id (str "kaizen:" site ":" (name id) ":" (:from window) "_" (:to window))
    :severity severity
    :title (str "[" site "] " title)
    :body (str/join
           "\n"
-          [(str "## 測ったこと")
+          (remove
+           nil?
+           [(str "## 測ったこと")
            (str "- サイト: " site)
            (str "- 期間: " (:from window) " 〜 " (:to window) "（両端含む）")
            (str "- 根拠: " (pr-str evidence))
+           (coverage-line window coverage sections)
            ""
            "## 答えるべき問い"
            question
@@ -235,4 +305,4 @@
            "## この issue が言っていないこと"
            (str "回遊の計測は counts と dates だけで、訪問者を識別しない。"
                 "どこで注意が止まり、どこに届いていないかは分かるが、"
-                "**なぜ**は分からない。原因の推測はここには書かない。")])})
+                "**なぜ**は分からない。原因の推測はここには書かない。")]))})
