@@ -1,5 +1,6 @@
 (ns kaiyu.diagnose-test
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [kaiyu.core :as kaiyu]
             [kaiyu.diagnose :as dx]))
 
@@ -34,6 +35,68 @@
         ids (set (map :id (:findings d)))]
     (is (contains? ids :kaiyu.measurement/visits-empty-while-measured))
     (is (not (:blocked? d)) "measured-but-empty is answerable, so the rest still runs")))
+
+(deftest a-partial-section-empty-beside-a-live-sibling-is-a-question
+  (testing "kotobase.net 2026-08-13: transitions held 0 rows since 08-07 while
+            visits — switched on the same day — counted 575. Nothing said so,
+            because the empty-row rule only looked at :measured sections"
+    (let [d (dx/diagnose (-> (report {})
+                             (assoc-in [:sections :visits]
+                                       (kaiyu/section win [{:source "direct" :count 569}
+                                                           {:source "search" :count 6}]
+                                                      "2026-08-05"))
+                             (assoc-in [:sections :dwell]
+                                       (kaiyu/section win [{:route "video" :bucket "60_179" :count 30}]
+                                                      "2026-08-05"))
+                             (assoc-in [:sections :transitions]
+                                       (kaiyu/section win [] "2026-08-05"))))
+          f (first (filter #(= :kaiyu.measurement/transitions-empty-while-collecting (:id %))
+                           (:findings d)))]
+      (is (some? f))
+      (is (= :high (:severity f)))
+      (is (= :dwell (get-in f [:evidence :witness]))
+          "the witness is chosen by name, so the same one is cited on every platform")
+      (is (= 1 (get-in f [:evidence :witness-rows])))
+      (is (not (:blocked? d))
+          "counts cannot separate 「誰も回遊していない」 from 「辺が emit されていない」,
+           so this asks rather than suppressing the site findings")
+      (is (= (:id f) (:id (dx/top-finding d)))
+          "a section two site rules silently draw on outranks a medium about the site"))))
+
+(deftest a-young-collector-is-still-allowed-to-be-empty
+  (testing "no sibling holds rows, so nothing rules out 'switched on an hour ago'"
+    (let [d (dx/diagnose (-> (report {})
+                             (assoc-in [:sections :visits] (kaiyu/section win [] "2026-08-05"))
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] "2026-08-05"))
+                             (assoc-in [:sections :transitions] (kaiyu/section win [] "2026-08-05"))))]
+      (is (empty? (filter #(str/ends-with? (name (:id %)) "-empty-while-collecting")
+                          (:findings d)))))))
+
+(deftest a-sibling-that-started-earlier-witnesses-nothing
+  (testing "every row it holds may predate the day this section was switched on"
+    (let [d (dx/diagnose (-> (report {})
+                             (assoc-in [:sections :visits]
+                                       (kaiyu/section win [{:source "direct" :count 400}]
+                                                      "2026-08-02"))
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))
+                             (assoc-in [:sections :transitions]
+                                       (kaiyu/section win [] "2026-08-05"))))]
+      (is (nil? (first (filter #(= :kaiyu.measurement/transitions-empty-while-collecting (:id %))
+                               (:findings d))))))))
+
+(deftest a-section-that-was-never-collected-is-not-this-finding
+  (testing "kotobase.net has no client beacon, so its dwell reports :not-measured
+            by construction — that is the :blocked rule's business, not this one"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-20"})
+                             (assoc-in [:sections :visits]
+                                       (kaiyu/section win [{:source "direct" :count 400}]
+                                                      "2026-08-05"))
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))
+                             (assoc-in [:sections :transitions]
+                                       (kaiyu/section win [] "2026-08-05"))))]
+      (is (empty? (filter #(= :dwell (get-in % [:evidence :section]))
+                          (filter #(str/ends-with? (name (:id %)) "-empty-while-collecting")
+                                  (:findings d))))))))
 
 (deftest a-site-that-was-not-live-yet-is-not-a-broken-instrument
   (testing "no rows before the site existed is the correct answer, not a fault"
