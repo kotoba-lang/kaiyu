@@ -25,6 +25,19 @@
   that report would have filed 『誰も来ていない』 issues, and every one of them
   would have been about a broken read.
 
+  **What turns absence back into evidence.** A `:partial` section is normally
+  allowed to be empty, because collection may have started an hour ago. But
+  when a sibling section began collecting on the SAME DAY OR LATER and holds
+  rows, the instrument demonstrably was not silent during this section's whole
+  span, and the emptiness becomes a fact about this section rather than about
+  how young the collector is. Measured 2026-08-13 on kotobase.net, whose
+  `transitions` had held 0 rows since 2026-08-07 while `visits` — switched on
+  the same day, read in the same response — had counted 575: two of the four
+  site rules had been drawing on an empty section for six days and nothing said
+  so. The finding still only asks, because counts cannot separate 「誰も回遊して
+  いない」 from 「辺が emit されていない」; it is `:high` rather than `:blocked`
+  for the same reason.
+
   **What this does NOT do**, written down because the opposite claim stood here
   until 2026-08-11 and was false: the four site rules receive `:rows` and never
   see `:state`. They fire on a `:partial` section, and on a `:not-measured` one
@@ -62,6 +75,25 @@
 
 ;; ───────────────────────── rules ─────────────────────────
 
+(defn- live-collection-witness
+  "The sibling section whose rows prove the instrument was reporting DURING
+  this section's collecting span, or nil.
+
+  Only a sibling that began collecting no earlier than this one qualifies. Its
+  span is then contained in this one's, so its rows cannot all predate the
+  moment this section was switched on — which is exactly what a sibling that
+  started earlier fails to rule out. Sorted by name so the witness a finding
+  cites is the same one on every platform the report is read on."
+  [sections since]
+  (->> sections
+       (keep (fn [[k {:keys [collected-since rows]}]]
+               (when (and (seq rows)
+                          (some? collected-since)
+                          (>= (compare collected-since since) 0))
+                 {:section k :collected-since collected-since :rows (count rows)})))
+       (sort-by (comp name :section))
+       first))
+
 (defn measurement-findings
   "Rules about the instrument, checked before any rule about the site.
 
@@ -70,6 +102,8 @@
   neither is a fact about visitors."
   [{:keys [window sections site-live-since]}]
   (keep (fn [[section {:keys [state collected-since rows]}]]
+          (let [witness (when (and (= :partial state) (empty? rows) (some? collected-since))
+                          (live-collection-witness sections collected-since))]
           (cond
             (and (= :not-measured state)
                  (or (nil? site-live-since)
@@ -94,7 +128,23 @@
                      {:section section :collected-since collected-since :window window}
                      [section])
 
-            :else nil))
+            witness
+            (finding (keyword "kaiyu.measurement" (str (name section) "-empty-while-collecting"))
+                     :high
+                     (str (name section) " は収集が動いているのに 0 行")
+                     (str "収集は " collected-since " から動いているのに、この window の "
+                          (name section) " は 0 行。同じ日以降に始まった "
+                          (name (:section witness)) " は " (:rows witness)
+                          " 行を記録しているので、計器そのものは黙っていない。"
+                          "この面が本当に 0 なのか、この section だけが記録されていないのか。")
+                     {:section section :state state :collected-since collected-since
+                      :witness (:section witness)
+                      :witness-collected-since (:collected-since witness)
+                      :witness-rows (:rows witness)
+                      :window window}
+                     [section])
+
+            :else nil)))
         sections))
 
 (defn dead-end-findings
