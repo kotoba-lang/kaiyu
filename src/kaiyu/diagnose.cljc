@@ -38,6 +38,13 @@
   いない」 from 「辺が emit されていない」; it is `:high` rather than `:blocked`
   for the same reason.
 
+  **What absence can also mean.** A site may never have instrumented a section
+  at all, and until 2026-08-14 that returned the same value as a beacon that
+  broke — the failure this library exists to prevent, aimed at itself. Such
+  sections are DECLARED with `:uninstrumented`; the declaration is reported in
+  `:coverage`, and a declaration its own data contradicts is `:blocked` above
+  whatever it was silencing. See `measurement-findings`.
+
   **What this does NOT do**, written down because the opposite claim stood here
   until 2026-08-11 and was false: the four site rules receive `:rows` and never
   see `:state`. They fire on a `:partial` section, and on a `:not-measured` one
@@ -99,12 +106,62 @@
 
   A section that is `:not-measured` inside a window the site was live for is
   either a beacon that stopped or a read that throws — both are urgent, and
-  neither is a fact about visitors."
-  [{:keys [window sections site-live-since]}]
+  neither is a fact about visitors.
+
+  **There is a third reading, and until 2026-08-14 this returned the same value
+  for it.** A site can simply not instrument a section at all. kotobase.net is
+  a build-time-generated multi-page site with no client script: its store
+  returns `(kaiyu/section win [] nil)` as a literal constant and says so in its
+  own docstring (『Dwell is not measured here』). The three answers the question
+  offers — beacon stopped / read threw / nobody came — are all wrong for it, and
+  no human can close the issue, because there is nothing to fix and nothing to
+  wait for. Left alone it is worse than noise: `diagnose` short-circuits on
+  `:blocked`, so one permanently-unanswerable finding silences every site rule
+  for that site forever. Measured on kotobase.net, whose window rolled past its
+  `:site-live-since` on 2026-08-13 and whose four site rules — one of which had
+  been the top finding eleven times — stopped being evaluated the next day.
+
+  So a site may DECLARE the sections it does not collect, via `:uninstrumented`.
+  Two things keep that from becoming a mute switch:
+
+  - the declaration is carried in `coverage`, so a reader sees 「宣言により
+    計測していない」 rather than a section that quietly is not mentioned;
+  - a declaration contradicted by its own data is itself `:blocked`, and ranks
+    above what it was silencing. A site that starts collecting the section, or
+    a declaration copied onto the wrong site, surfaces on the next tick instead
+    of muting it.
+
+  What it is NOT for: a section that is instrumented and returning nothing.
+  shinshi.club's `transitions` read null on the same day, while its `dwell` —
+  client-observed, same beacon, same response — held ten rows. That is the case
+  this rule exists to catch, and declaring it away would delete the finding."
+  [{:keys [window sections site-live-since uninstrumented]}]
   (keep (fn [[section {:keys [state collected-since rows]}]]
-          (let [witness (when (and (= :partial state) (empty? rows) (some? collected-since))
+          (let [declared? (contains? (or uninstrumented #{}) section)
+                witness (when (and (= :partial state) (empty? rows) (some? collected-since))
                           (live-collection-witness sections collected-since))]
           (cond
+            ;; Checked BEFORE the declaration is honoured: a stale declaration
+            ;; has to be louder than the finding it suppresses.
+            (and declared? (or (seq rows) (some? collected-since)))
+            (finding (keyword "kaiyu.measurement"
+                              (str (name section) "-declared-uninstrumented-but-collecting"))
+                     :blocked
+                     (str (name section) " は「計測しない」と宣言されているのに行がある")
+                     (str "この site は " (name section) " を計測しない宣言を持っているが、"
+                          "この window では " (count rows) " 行"
+                          (when collected-since (str "・収集開始 " collected-since))
+                          "が返っている。宣言が古くなったのか、別の site の宣言が"
+                          "紛れているのか。宣言はこの section の所見を黙らせるので、"
+                          "先にこれを決める。")
+                     {:section section :state state :collected-since collected-since
+                      :rows (count rows) :declared :uninstrumented :window window}
+                     [section])
+
+            ;; Declared and empty — the shape the declaration predicts. Not a
+            ;; fault, and not a silence either: `coverage` carries it.
+            declared? nil
+
             (and (= :not-measured state)
                  (or (nil? site-live-since)
                      (<= (compare site-live-since (:from window)) 0)))
@@ -260,11 +317,18 @@
 
   Kept beside the findings rather than folded into them because a finding is a
   question about the site and this is a fact about the instrument; a reader who
-  cannot see both is being asked to trust a number without its span."
-  [sections]
-  (reduce-kv (fn [m k {:keys [state collected-since]}]
-               (assoc m k {:state state :collected-since collected-since}))
-             {} (into {} sections)))
+  cannot see both is being asked to trust a number without its span.
+
+  A declared-uninstrumented section carries `:declared :uninstrumented`. It is
+  reported rather than dropped on purpose: a suppression a reader cannot see is
+  indistinguishable from a section that passed."
+  ([sections] (coverage sections #{}))
+  ([sections uninstrumented]
+   (reduce-kv (fn [m k {:keys [state collected-since]}]
+                (assoc m k (cond-> {:state state :collected-since collected-since}
+                             (contains? (or uninstrumented #{}) k)
+                             (assoc :declared :uninstrumented))))
+              {} (into {} sections))))
 
 (defn diagnose
   "A kaiyu report → ranked findings.
@@ -275,6 +339,7 @@
      :window {...}                       ; kaiyu.core/window
      :vocabulary #{...}                  ; the site's route set
      :site-live-since \"YYYY-MM-DD\"     ; optional
+     :uninstrumented #{:dwell}           ; optional; sections the site does not collect
      :sections {:visits {...} :dwell {...} :transitions {...}}}
 
   where each section is a `kaiyu.core/section` map.
@@ -283,13 +348,14 @@
   doubt, the site findings are not reported at all — not sorted below, not
   included. Reporting both would invite acting on the ones that are easier to
   act on, which are exactly the ones that might be artefacts."
-  [{:keys [sections vocabulary] :as report}]
+  [{:keys [sections vocabulary uninstrumented] :as report}]
   (let [measurement (vec (measurement-findings report))
         blocked (filter #(= :blocked (:severity %)) measurement)]
     (if (seq blocked)
       {:site (:site report)
        :window (:window report)
-       :coverage (coverage sections)
+       :coverage (coverage sections uninstrumented)
+       :uninstrumented (or uninstrumented #{})
        :findings (vec (sort-by (comp severity-rank :severity) measurement))
        :blocked? true}
       (let [rows (fn [k] (get-in sections [k :rows] []))
@@ -302,7 +368,8 @@
                                               :dwell (rows :dwell)}))]
         {:site (:site report)
          :window (:window report)
-         :coverage (coverage sections)
+         :coverage (coverage sections uninstrumented)
+         :uninstrumented (or uninstrumented #{})
          :findings (vec (sort-by (juxt (comp severity-rank :severity) :id) findings))
          :blocked? false}))))
 
@@ -322,9 +389,15 @@
   Reports the WORST state among the sections the finding drew on: a finding
   built from a fully measured section and a partial one is only as good as the
   partial one. nil when there is nothing to say — a caller that built a
-  diagnosis by hand gets the old body rather than a fabricated boundary."
+  diagnosis by hand gets the old body rather than a fabricated boundary.
+
+  A declared-uninstrumented section is `:not-measured` too, but 「収集開始日が
+  記録されていない」 would be the wrong reason to give for it: the date is not
+  missing, the collection does not exist. It is named instead, so a reader can
+  tell a finding built partly on a section nobody collects from one built on a
+  section whose span is genuinely unknown."
   [window coverage sections]
-  (when-let [cs (seq (keep coverage sections))]
+  (when-let [cs (seq (keep (fn [s] (some-> (coverage s) (assoc :section s))) sections))]
     (let [worst (apply min-key (comp state-rank :state) cs)
           since (:collected-since worst)]
       (case (:state worst)
@@ -335,8 +408,12 @@
              "window は " (:from window) " からだが、それ以前の行は無い。"
              "この数字を window 全体の話として読まないこと")
         :not-measured
-        (str "- 根拠の範囲: **不明**（収集開始日が記録されていない）。"
-             "この数字が何日分なのかは、この報告からは言えない")
+        (if (= :uninstrumented (:declared worst))
+          (str "- 根拠の範囲: この site は " (name (:section worst))
+               " を**計測していない**（宣言済み）。"
+               "この数字はそれ以外の section だけから作られている")
+          (str "- 根拠の範囲: **不明**（収集開始日が記録されていない）。"
+               "この数字が何日分なのかは、この報告からは言えない"))
         nil))))
 
 (defn ->issue
