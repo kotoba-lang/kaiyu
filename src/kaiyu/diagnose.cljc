@@ -117,9 +117,10 @@
   no human can close the issue, because there is nothing to fix and nothing to
   wait for. Left alone it is worse than noise: `diagnose` short-circuits on
   `:blocked`, so one permanently-unanswerable finding silences every site rule
-  for that site forever. Measured on kotobase.net, whose window rolled past its
-  `:site-live-since` on 2026-08-13 and whose four site rules — one of which had
-  been the top finding eleven times — stopped being evaluated the next day.
+  for that site forever. Measured on kotobase.net: its window first rolled past
+  `:site-live-since` for the window ending 2026-08-13, and from that window on
+  its four site rules stopped being evaluated — including the acquisition
+  finding that had been top in all five recorded rounds before it.
 
   So a site may DECLARE the sections it does not collect, via `:uninstrumented`.
   Two things keep that from becoming a mute switch:
