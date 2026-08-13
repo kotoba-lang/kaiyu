@@ -7,12 +7,13 @@
 (def win (kaiyu/window "2026-08-08" {:days 7}))
 
 (defn- report
-  [{:keys [visits dwell transitions since vocabulary live-since]
+  [{:keys [visits dwell transitions since vocabulary live-since uninstrumented]
     :or {since "2026-06-01"}}]
   {:site "example.test"
    :window win
    :vocabulary (or vocabulary #{"home" "video" "pricing" "signup"})
    :site-live-since live-since
+   :uninstrumented (or uninstrumented #{})
    :sections {:visits (kaiyu/section win (or visits []) since)
               :dwell (kaiyu/section win (or dwell []) since)
               :transitions (kaiyu/section win (or transitions []) since)}})
@@ -105,6 +106,70 @@
                              (assoc-in [:sections :visits] (kaiyu/section win [] nil))
                              (assoc-in [:sections :transitions] (kaiyu/section win [] nil))))]
       (is (not (:blocked? d))))))
+
+(deftest a-declared-uninstrumented-section-is-not-a-broken-instrument
+  (testing "kotobase.net has no client beacon at all — its store returns
+            (section win [] nil) as a literal constant. Beacon stopped / read
+            threw / nobody came are all wrong, so nobody can close the issue;
+            and because :blocked short-circuits, leaving it standing silences
+            every site rule for that site permanently"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"
+                                      :uninstrumented #{:dwell}
+                                      :visits [{:source "direct" :count 679}
+                                               {:source "search" :count 7}]
+                                      :transitions [{:from "home" :to "support" :count 2}]})
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))))]
+      (is (not (:blocked? d)))
+      (is (empty? (filter #(= :kaiyu.measurement/dwell-not-measured (:id %)) (:findings d))))
+      (is (some? (first (filter #(= :kaiyu.acquisition/single-channel-direct (:id %))
+                                (:findings d))))
+          "the site rules the block was suppressing are evaluated again"))))
+
+(deftest a-declaration-is-reported-rather-than-dropped
+  (testing "a suppression the reader cannot see is indistinguishable from a pass"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01" :uninstrumented #{:dwell}})
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))))]
+      (is (= :uninstrumented (get-in d [:coverage :dwell :declared])))
+      (is (nil? (get-in d [:coverage :visits :declared]))
+          "only the declared section carries it"))))
+
+(deftest a-declaration-contradicted-by-its-own-data-is-blocked
+  (testing "the declaration must not become a mute switch: a site that starts
+            collecting the section, or a declaration copied onto the wrong site,
+            has to surface on the next tick instead of muting it"
+    (let [d (dx/diagnose (report {:live-since "2026-08-01"
+                                  :uninstrumented #{:dwell}
+                                  :dwell [{:route "video" :bucket "lt10" :count 50}]}))
+          f (dx/top-finding d)]
+      (is (:blocked? d))
+      (is (= :kaiyu.measurement/dwell-declared-uninstrumented-but-collecting (:id f)))
+      (is (= :blocked (:severity f)))
+      (is (= 1 (get-in f [:evidence :rows]))))))
+
+(deftest an-undeclared-empty-section-is-still-a-broken-instrument
+  (testing "shinshi.club 2026-08-14: transitions read collected-since nil while
+            dwell — client-observed, same beacon, same response — held ten rows.
+            That is the case this rule exists to catch. Only a declaration may
+            quiet a section, and declaring this one would delete the finding
+            rather than answer it"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-06-11"
+                                      :visits [{:source "direct" :count 17}]
+                                      :dwell [{:route "video" :bucket "lt10" :count 8}]})
+                             (assoc-in [:sections :transitions] (kaiyu/section win [] nil))))]
+      (is (:blocked? d))
+      (is (= :kaiyu.measurement/transitions-not-measured (:id (dx/top-finding d)))))))
+
+(deftest an-issue-drawn-partly-on-an-uninstrumented-section-says-so
+  (testing "『収集開始日が記録されていない』 is the wrong reason for a declared
+            section: the date is not missing, the collection does not exist"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"
+                                      :uninstrumented #{:dwell}
+                                      :transitions [{:from "home" :to "video" :count 3}]})
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))))
+          unreached (first (filter #(= :kaiyu.reach/unreached-signup (:id %)) (:findings d)))]
+      (is (some? unreached) "reach draws on [:transitions :dwell]")
+      (is (re-find #"この site は dwell を\*\*計測していない\*\*（宣言済み）"
+                   (:body (dx/->issue d unreached)))))))
 
 (deftest bounce-is-reported-per-route-with-its-numbers
   (let [d (dx/diagnose (report {:dwell [{:route "pricing" :bucket "lt10" :count 45}
