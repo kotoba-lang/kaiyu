@@ -229,13 +229,60 @@
     (> (parse-day collected-since) (parse-day from)) :partial
     :else :measured))
 
+(defn trailing-window
+  "The last `days` days of `win`, as a window.
+
+  What a caller re-queries to find out whether a section is still collecting.
+  `measurement-state` only knows where collection BEGAN; a beacon that wrote
+  for two days and died returns the same `:partial` as one still writing, and
+  a report cannot distinguish those from one response. Re-asking the same read
+  face for its own trailing span is the cheapest thing that can: the host
+  already filters by window, so no store has to learn a new query.
+
+  Clamped to at least one day and never longer than `win` — a trailing span as
+  long as the window answers nothing, because 「直近 7 日は 0 行」 and 「この
+  window は 0 行」 are the same sentence."
+  [{:keys [days to] :as win} trailing-days]
+  (let [n (-> (if (number? trailing-days) (long trailing-days) 1)
+              (max 1)
+              (min (or days 1)))]
+    (window to {:days n})))
+
+(defn recent
+  "`{:days n :rows k}` — how many rows the trailing `n` days of the window hold.
+
+  Recorded rather than judged: whether 0 rows in the last three days means a
+  dead beacon or a quiet site is not something counts can settle, and
+  `kaiyu.diagnose` is where that question gets asked. Kept beside
+  `:collected-since` because the two are the same kind of fact — the ends of
+  the span the rows are true within — and a reader given only the near end
+  completes the far one as 『今日まで』.
+
+  **nil unless a count was actually read.** A probe that failed — the request
+  threw, the host answered 502, the caller never made it — must not enter as
+  zero rows, because zero rows is the whole evidence for 『収集が止まっている』
+  and a failed probe would manufacture it. Returning nil makes no claim, and a
+  section without `:recent` produces no staleness finding at all. This is the
+  same failure ADR-2608136000 names: a check that could not run returning the
+  value of a check that ran and found nothing."
+  [{:keys [days]} row-count]
+  (when (and (number? row-count) (not (neg? row-count)))
+    {:days days :rows (long row-count)}))
+
 (defn section
   "Wrap a section's rows with the boundary a reader needs to interpret them.
 
   `rows` is whatever the host's store returned; this does not touch it. What is
   added is `:collected-since` and the `:state` above, together — separately
-  they are two numbers a caller has to remember to compare."
-  [win rows collected-since]
-  {:rows (vec rows)
-   :collected-since collected-since
-   :state (measurement-state win collected-since)})
+  they are two numbers a caller has to remember to compare.
+
+  The 4-arity carries `recent` (see above), the far end of that span. It is
+  optional because only a caller that can re-query can produce it, and a
+  caller that cannot must not be made to guess: absent, every reading behaves
+  exactly as it did before this arity existed."
+  ([win rows collected-since] (section win rows collected-since nil))
+  ([win rows collected-since recent]
+   (cond-> {:rows (vec rows)
+            :collected-since collected-since
+            :state (measurement-state win collected-since)}
+     (some? recent) (assoc :recent recent))))

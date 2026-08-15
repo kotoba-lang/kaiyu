@@ -315,3 +315,123 @@
       (is (some? dead-end) "the site rule reads rows from a :not-measured section")
       (is (re-find #"根拠の範囲: \*\*不明\*\*" (:body (dx/->issue d dead-end)))
           "an unknown boundary is stated as unknown, never as the window"))))
+
+;; ── staleness: rows that are real and no longer arriving ──────────────
+;;
+;; `win` is 2026-08-02〜2026-08-08, so its trailing 3 days are 08-06〜08-08.
+
+(defn- with-recent [section days rows]
+  (assoc section :recent {:days days :rows rows}))
+
+(deftest a-section-that-stopped-beside-a-collecting-sibling-is-a-question
+  (testing "babiniku.net 2026-08-15: visits/dwell/transitions had been
+            byte-identical since 08-11 while the tick reported ok, because
+            measurement-state knows where collection began and nothing about
+            where it stopped"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                             (assoc-in [:sections :visits]
+                                       (with-recent (kaiyu/section win [{:source "direct" :count 9}]
+                                                                   "2026-08-03")
+                                                    3 4))
+                             (assoc-in [:sections :dwell]
+                                       (with-recent (kaiyu/section win [{:route "chat" :bucket "10_29" :count 2}]
+                                                                   "2026-08-04")
+                                                    3 0))
+                             (assoc-in [:sections :transitions]
+                                       (with-recent (kaiyu/section win [{:from "home" :to "chat" :count 8}]
+                                                                   "2026-08-04")
+                                                    3 0))))
+          f (first (filter #(= :kaiyu.measurement/transitions-stopped-while-sibling-collects (:id %))
+                           (:findings d)))]
+      (is (some? f))
+      (is (= :high (:severity f)))
+      (is (= :visits (get-in f [:evidence :witness]))
+          "the sibling with recent rows proves the instrument is still writing")
+      (is (= "2026-08-06" (get-in f [:evidence :trailing :from])))
+      (is (not (:blocked? d))
+          "never :blocked — a quiet site has this shape, and blocking would
+           silence every site finding for it permanently"))))
+
+(deftest a-whole-instrument-that-went-quiet-is-one-question-not-three
+  (let [stale (fn [rows since] (with-recent (kaiyu/section win rows since) 3 0))
+        d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                           (assoc-in [:sections :visits] (stale [{:source "direct" :count 9}] "2026-08-03"))
+                           (assoc-in [:sections :dwell] (stale [{:route "chat" :bucket "10_29" :count 2}] "2026-08-04"))
+                           (assoc-in [:sections :transitions] (stale [{:from "home" :to "chat" :count 8}] "2026-08-04"))))
+        stopped (filter #(= :kaiyu.measurement/collection-stopped (:id %)) (:findings d))]
+    (is (= 1 (count stopped)) "one event, not one finding per section")
+    (is (= [:dwell :transitions :visits] (get-in (first stopped) [:evidence :sections])))
+    (is (empty? (filter #(str/ends-with? (name (:id %)) "-stopped-while-sibling-collects")
+                        (:findings d)))
+        "with nothing fresh there is no witness, so the weaker reading is the honest one")
+    (is (not (:blocked? d)))
+    (is (some? (first (filter #(= :kaiyu.journey/dead-end-chat (:id %)) (:findings d))))
+        "the site findings are still reported — this suppresses nothing")))
+
+(deftest rows-still-arriving-are-not-a-staleness-finding
+  (let [fresh (fn [rows since] (with-recent (kaiyu/section win rows since) 3 2))
+        d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                           (assoc-in [:sections :visits] (fresh [{:source "direct" :count 9}] "2026-08-03"))
+                           (assoc-in [:sections :dwell] (fresh [{:route "chat" :bucket "10_29" :count 2}] "2026-08-04"))
+                           (assoc-in [:sections :transitions] (fresh [{:from "home" :to "chat" :count 8}] "2026-08-04"))))]
+    (is (empty? (filter #(str/includes? (name (:id %)) "stopped") (:findings d))))
+    (is (empty? (filter #(= :kaiyu.measurement/collection-stopped (:id %)) (:findings d))))))
+
+(deftest a-caller-that-cannot-probe-behaves-exactly-as-before
+  (testing "only a caller that can re-query can produce :recent, and one that
+            cannot must not be made to guess"
+    (let [d (dx/diagnose (report {:live-since "2026-08-01"
+                                  :transitions [{:from "home" :to "chat" :count 8}]}))]
+      (is (empty? (filter #(str/includes? (name (:id %)) "stopped") (:findings d))))
+      (is (= {:state :measured :collected-since "2026-06-01"}
+             (get-in d [:coverage :transitions]))
+          "coverage gains nothing when there is nothing to add"))))
+
+(deftest a-collector-switched-on-inside-the-trailing-span-is-not-stale
+  (testing "a section that started collecting yesterday cannot have been silent
+            for the last three days; reading it as stale reports its youth as a
+            fault — the shape :partial was added to prevent"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                             (assoc-in [:sections :transitions]
+                                       (with-recent (kaiyu/section win [{:from "home" :to "chat" :count 8}]
+                                                                   "2026-08-07")
+                                                    3 0))))]
+      (is (empty? (filter #(str/includes? (name (:id %)) "stopped") (:findings d)))))))
+
+(deftest a-declared-uninstrumented-section-is-never-stale
+  (testing "a section nobody collects has no rows to stop arriving"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01" :uninstrumented #{:dwell}})
+                             (assoc-in [:sections :dwell] (kaiyu/section win [] nil))
+                             (assoc-in [:sections :visits]
+                                       (with-recent (kaiyu/section win [{:source "direct" :count 9}]
+                                                                   "2026-08-03")
+                                                    3 0))
+                             (assoc-in [:sections :transitions]
+                                       (with-recent (kaiyu/section win [{:from "home" :to "chat" :count 8}]
+                                                                   "2026-08-03")
+                                                    3 0))))
+          stopped (first (filter #(= :kaiyu.measurement/collection-stopped (:id %)) (:findings d)))]
+      (is (some? stopped))
+      (is (= [:transitions :visits] (get-in stopped [:evidence :sections]))
+          "the uninstrumented section is not counted among those that went quiet"))))
+
+(deftest the-issue-body-states-both-ends-of-the-span
+  (testing "「2026-08-11 以降のみ」 names the near end and a reader completes the
+            far one as 『今日まで』; on babiniku.net that sentence was printed for
+            four days about rows that all fell on 08-10 and 08-11"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                             (assoc-in [:sections :visits]
+                                       (with-recent (kaiyu/section win [{:source "direct" :count 9}]
+                                                                   "2026-08-03")
+                                                    3 1))
+                             (assoc-in [:sections :transitions]
+                                       (with-recent (kaiyu/section win [{:from "home" :to "chat" :count 8}]
+                                                                   "2026-08-04")
+                                                    3 0))))
+          dead-end (first (filter #(= :kaiyu.journey/dead-end-chat (:id %)) (:findings d)))
+          body (:body (dx/->issue d dead-end))]
+      (is (some? dead-end))
+      (is (re-find #"2026-08-04 以降のみ" body) "the near end is still named")
+      (is (re-find #"直近 3 日（2026-08-06〜2026-08-08）は transitions とも 0 行" body)
+          "and so is the far one")
+      (is (re-find #"window の終わりまで続いた話ではない" body)))))

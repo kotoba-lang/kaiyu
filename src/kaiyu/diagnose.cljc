@@ -45,6 +45,19 @@
   `:coverage`, and a declaration its own data contradicts is `:blocked` above
   whatever it was silencing. See `measurement-findings`.
 
+  **Where collection STOPPED.** `measurement-state` is built entirely from
+  `collected-since`, so it answers where a span began and has nothing to say
+  about where it ended: a beacon that wrote for two days and died reports the
+  same `:partial` as one still writing, and every site rule then draws on
+  frozen rows under the window's name. Measured 2026-08-15 on babiniku.net,
+  whose three sections had been byte-identical since 08-11 while the tick
+  reported `ok` and the queue was asked the same dead-end question on 08-11,
+  08-12 and 08-13. A caller that can re-query supplies `:recent` (see
+  `kaiyu.core/recent`), and `staleness-findings` asks about it. Deliberately
+  never `:blocked`: a quiet site has exactly this shape, and blocking it would
+  hand a low-traffic site the permanent silence `:uninstrumented` was added to
+  undo, twice.
+
   **What this does NOT do**, written down because the opposite claim stood here
   until 2026-08-11 and was false: the four site rules receive `:rows` and never
   see `:state`. They fire on a `:partial` section, and on a `:not-measured` one
@@ -205,6 +218,101 @@
             :else nil)))
         sections))
 
+(defn- stale-sections
+  "Sections holding rows in the window but none in its trailing span.
+
+  `collected-since` must fall strictly before that span: a section switched on
+  inside it cannot have been silent for it, and reading one as stale would
+  report the collector's own youth as a fault."
+  [sections trailing]
+  (->> sections
+       (keep (fn [[k {:keys [collected-since rows recent]}]]
+               (when (and (seq rows)
+                          (some? recent)
+                          (zero? (:rows recent))
+                          (some? collected-since)
+                          (neg? (compare collected-since (:from trailing))))
+                 {:section k :collected-since collected-since :rows (count rows)})))
+       (sort-by (comp name :section))
+       vec))
+
+(defn staleness-findings
+  "Collection that HAS rows, and none of them recent.
+
+  `kaiyu.core/measurement-state` knows where collection began and nothing about
+  where it stopped, so a beacon that wrote for two days and died reports the
+  same `:partial` as one still writing — and every site rule then draws on
+  frozen rows while the report carries the window's name. Measured 2026-08-15
+  on babiniku.net: `visits`, `dwell` and `transitions` had been byte-identical
+  across rounds since 2026-08-11, the tick reported `ok`, and the queue was
+  asked the same question about a dead end computed from those rows on 08-11,
+  08-12 and 08-13. Re-querying the read face for its own trailing span settled
+  in one request what three rounds of snapshots could not.
+
+  **Never `:blocked`.** A quiet site produces exactly this shape, and
+  `diagnose` drops every site finding when anything is blocked — so ranking
+  this above the site would hand a low-traffic site permanent silence, which is
+  the failure `:uninstrumented` was added to undo, twice. It ranks with the
+  other 『the rows are real but may not mean what they look like』 findings and
+  suppresses nothing.
+
+  Two readings, told apart by the same witness logic as `live-collection-witness`:
+
+  - a sibling section holds recent rows, so the instrument is demonstrably
+    still writing and this section alone went quiet;
+  - nothing is recent, so either collection stopped or nobody came — which
+    counts cannot separate, and which is therefore asked rather than asserted."
+  [{:keys [window sections uninstrumented]}]
+  (let [instrumented (remove (fn [[k _]] (contains? (or uninstrumented #{}) k)) sections)
+        probe-days (some (fn [[_ s]] (get-in s [:recent :days])) instrumented)]
+    (if (nil? probe-days)
+      []
+      (let [trailing (kaiyu/trailing-window window probe-days)
+            stale (stale-sections instrumented trailing)
+            fresh (->> instrumented
+                       (keep (fn [[k {:keys [recent]}]]
+                               (when (and (some? recent) (pos? (:rows recent)))
+                                 {:section k :rows (:rows recent)})))
+                       (sort-by (comp name :section))
+                       first)]
+        (cond
+          (empty? stale) []
+
+          fresh
+          (mapv (fn [{:keys [section collected-since rows]}]
+                  (finding (keyword "kaiyu.measurement"
+                                    (str (name section) "-stopped-while-sibling-collects"))
+                           :high
+                           (str (name section) " は " (:from trailing) " 以降 1 行も増えていない")
+                           (str "この window の " (name section) " は " rows " 行あるが、直近 "
+                                (:days trailing) " 日（" (:from trailing) "〜" (:to trailing)
+                                "）は 0 行。同じ応答の " (name (:section fresh)) " はその期間に "
+                                (:rows fresh) " 行を記録しているので、計器そのものは黙っていない。"
+                                "この section だけが記録されなくなったのか、"
+                                "この面に本当に誰も来ていないのか。")
+                           {:section section :collected-since collected-since
+                            :rows rows :recent-rows 0 :trailing trailing
+                            :witness (:section fresh) :witness-recent-rows (:rows fresh)
+                            :window window}
+                           [section]))
+                stale)
+
+          :else
+          [(finding :kaiyu.measurement/collection-stopped
+                    :high
+                    (str "計測が " (:from trailing) " 以降 1 行も増えていない")
+                    (str "この window には行があるが、直近 " (:days trailing) " 日（"
+                         (:from trailing) "〜" (:to trailing) "）は "
+                         (str/join "・" (map (comp name :section) stale))
+                         " のいずれも 0 行。beacon が止まったのか、"
+                         "本当に誰も来ていないのか——この数字で所見を出す前にこれを決める。"
+                         "counts と dates だけでは区別が付かない。")
+                    {:sections (mapv :section stale)
+                     :collected-since (into {} (map (juxt :section :collected-since) stale))
+                     :rows (into {} (map (juxt :section :rows) stale))
+                     :recent-rows 0 :trailing trailing :window window}
+                    (mapv :section stale))])))))
+
 (defn dead-end-findings
   "Routes people reach and never leave.
 
@@ -325,8 +433,9 @@
   indistinguishable from a section that passed."
   ([sections] (coverage sections #{}))
   ([sections uninstrumented]
-   (reduce-kv (fn [m k {:keys [state collected-since]}]
+   (reduce-kv (fn [m k {:keys [state collected-since recent]}]
                 (assoc m k (cond-> {:state state :collected-since collected-since}
+                             (some? recent) (assoc :recent recent)
                              (contains? (or uninstrumented #{}) k)
                              (assoc :declared :uninstrumented))))
               {} (into {} sections))))
@@ -350,7 +459,8 @@
   included. Reporting both would invite acting on the ones that are easier to
   act on, which are exactly the ones that might be artefacts."
   [{:keys [sections vocabulary uninstrumented] :as report}]
-  (let [measurement (vec (measurement-findings report))
+  (let [measurement (into (vec (measurement-findings report))
+                          (staleness-findings report))
         blocked (filter #(= :blocked (:severity %)) measurement)]
     (if (seq blocked)
       {:site (:site report)
@@ -396,26 +506,42 @@
   記録されていない」 would be the wrong reason to give for it: the date is not
   missing, the collection does not exist. It is named instead, so a reader can
   tell a finding built partly on a section nobody collects from one built on a
-  section whose span is genuinely unknown."
+  section whose span is genuinely unknown.
+
+  **Both ends or neither.** 「2026-08-11 以降のみ」 names the near end of the
+  span and a reader completes the far one as 『今日まで』; on babiniku.net that
+  sentence was printed for four days about rows that all fell on 08-10 and
+  08-11. When a trailing probe is present it is appended, so the line states a
+  span rather than a start."
   [window coverage sections]
   (when-let [cs (seq (keep (fn [s] (some-> (coverage s) (assoc :section s))) sections))]
     (let [worst (apply min-key (comp state-rank :state) cs)
-          since (:collected-since worst)]
-      (case (:state worst)
-        :measured
-        (str "- 根拠の範囲: この window 全体（" since " から測れている）")
-        :partial
-        (str "- 根拠の範囲: **" since " 以降のみ**。"
-             "window は " (:from window) " からだが、それ以前の行は無い。"
-             "この数字を window 全体の話として読まないこと")
-        :not-measured
-        (if (= :uninstrumented (:declared worst))
-          (str "- 根拠の範囲: この site は " (name (:section worst))
-               " を**計測していない**（宣言済み）。"
-               "この数字はそれ以外の section だけから作られている")
-          (str "- 根拠の範囲: **不明**（収集開始日が記録されていない）。"
-               "この数字が何日分なのかは、この報告からは言えない"))
-        nil))))
+          since (:collected-since worst)
+          stale (->> cs
+                     (filter (fn [{:keys [recent]}] (and (some? recent) (zero? (:rows recent)))))
+                     (sort-by (comp name :section))
+                     seq)
+          freshness (when stale
+                      (let [trailing (kaiyu/trailing-window window (:days (:recent (first stale))))]
+                        (str "。**直近 " (:days trailing) " 日（" (:from trailing) "〜"
+                             (:to trailing) "）は " (str/join "・" (map (comp name :section) stale))
+                             " とも 0 行**——この数字は window の終わりまで続いた話ではない")))
+          line (case (:state worst)
+                 :measured
+                 (str "- 根拠の範囲: この window 全体（" since " から測れている）")
+                 :partial
+                 (str "- 根拠の範囲: **" since " 以降のみ**。"
+                      "window は " (:from window) " からだが、それ以前の行は無い。"
+                      "この数字を window 全体の話として読まないこと")
+                 :not-measured
+                 (if (= :uninstrumented (:declared worst))
+                   (str "- 根拠の範囲: この site は " (name (:section worst))
+                        " を**計測していない**（宣言済み）。"
+                        "この数字はそれ以外の section だけから作られている")
+                   (str "- 根拠の範囲: **不明**（収集開始日が記録されていない）。"
+                        "この数字が何日分なのかは、この報告からは言えない"))
+                 nil)]
+      (when line (str line freshness)))))
 
 (defn ->issue
   "A finding → the issue body a human reads in the queue.
