@@ -137,3 +137,33 @@
     (testing "an empty section still says which kind of empty it is"
       (is (= :not-measured (:state (kaiyu/section win [] nil))))
       (is (= :measured (:state (kaiyu/section win [] "2026-01-01")))))))
+
+(deftest trailing-window-is-the-far-end-of-the-same-span
+  (let [win (kaiyu/window "2026-08-15" {:days 7})]
+    (is (= {:days 7 :from "2026-08-09" :to "2026-08-15"} win))
+    (is (= {:days 3 :from "2026-08-13" :to "2026-08-15"} (kaiyu/trailing-window win 3)))
+    (is (= {:days 1 :from "2026-08-15" :to "2026-08-15"} (kaiyu/trailing-window win 1)))
+    (testing "never longer than the window — 「直近 7 日は 0 行」 and 「この
+              window は 0 行」 are the same sentence, and one of them is not a
+              freshness check"
+      (is (= win (kaiyu/trailing-window win 30))))
+    (testing "a missing or absurd span is one day, never an inverted range"
+      (is (= 1 (:days (kaiyu/trailing-window win 0))))
+      (is (= 1 (:days (kaiyu/trailing-window win -5))))
+      (is (= 1 (:days (kaiyu/trailing-window win nil)))))))
+
+(deftest a-section-carries-the-far-end-only-when-it-is-known
+  (let [win (kaiyu/window "2026-08-15" {:days 7})]
+    (is (nil? (:recent (kaiyu/section win [] "2026-08-11")))
+        "absent, every reading behaves exactly as it did before the arity existed")
+    (is (= {:days 3 :rows 0}
+           (:recent (kaiyu/section win [{:from "home" :to "chat" :count 8}] "2026-08-11"
+                                   (kaiyu/recent (kaiyu/trailing-window win 3) 0)))))
+    (testing "a probe that never produced a count makes no claim — zero rows is
+              the whole evidence for 『収集が止まっている』, so a failed request
+              entering as zero would manufacture it"
+      (is (nil? (kaiyu/recent {:days 3} nil)))
+      (is (nil? (kaiyu/recent {:days 3} :error)))
+      (is (nil? (kaiyu/recent {:days 3} -1)))
+      (is (= {:days 3 :rows 0} (kaiyu/recent {:days 3} 0))
+          "a probe that ran and read nothing is the case this exists for"))))
