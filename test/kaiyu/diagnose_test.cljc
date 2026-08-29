@@ -368,6 +368,61 @@
     (is (some? (first (filter #(= :kaiyu.journey/dead-end-chat (:id %)) (:findings d))))
         "the site findings are still reported — this suppresses nothing")))
 
+(deftest a-section-too-quiet-to-go-quiet-detectably-is-not-a-finding
+  (testing "shinshi.club 2026-08-29: dwell held ONE row in seven days, so its
+            own rate predicts 0.43 in three and zero is the EXPECTED
+            observation. It was reported :high 『stopped』 against a witness
+            whose ratio to it had not changed — one dwell per five visits over
+            the window, zero per four over the span — and would have gone on
+            being reported every day, because one old row can never re-enter
+            the trailing span"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                             (assoc-in [:sections :visits]
+                                       (with-recent (kaiyu/section win [{:source "direct" :count 5}]
+                                                                   "2026-08-03")
+                                                    3 4))
+                             (assoc-in [:sections :dwell]
+                                       (with-recent (kaiyu/section win [{:route "home" :bucket "lt10" :count 1}]
+                                                                   "2026-08-03")
+                                                    3 0))))]
+      (is (empty? (filter #(str/includes? (name (:id %)) "stopped") (:findings d)))
+          "one event in the window is not evidence of having stopped"))))
+
+(deftest a-section-with-volume-to-lose-still-reports-stopping
+  (testing "the floor guards the inference, not the finding: the same shape,
+            differing only in the quantity under test, still fires"
+    (let [d (dx/diagnose (-> (report {:live-since "2026-08-01"})
+                             (assoc-in [:sections :visits]
+                                       (with-recent (kaiyu/section win [{:source "direct" :count 5}]
+                                                                   "2026-08-03")
+                                                    3 4))
+                             (assoc-in [:sections :dwell]
+                                       (with-recent (kaiyu/section win [{:route "home" :bucket "lt10" :count 40}]
+                                                                   "2026-08-03")
+                                                    3 0))))
+          f (first (filter #(= :kaiyu.measurement/dwell-stopped-while-sibling-collects (:id %))
+                           (:findings d)))]
+      (is (some? f) "forty events over seven days predict seventeen in three")
+      (is (= :high (:severity f))))))
+
+(deftest volume-is-counted-in-events-not-in-groups
+  (testing "one row standing for eight events and one standing for one are not
+            the same evidence; counting rows would call them equal"
+    (let [quiet (fn [n] (-> (report {:live-since "2026-08-01"})
+                            (assoc-in [:sections :visits]
+                                      (with-recent (kaiyu/section win [{:source "direct" :count 5}]
+                                                                  "2026-08-03")
+                                                   3 4))
+                            (assoc-in [:sections :transitions]
+                                      (with-recent (kaiyu/section win [{:from "home" :to "chat" :count n}]
+                                                                  "2026-08-03")
+                                                   3 0))
+                            dx/diagnose
+                            :findings
+                            (->> (filter #(str/includes? (name (:id %)) "stopped")))))]
+      (is (empty? (quiet 2)) "a single row of two events cannot show silence")
+      (is (seq (quiet 8)) "a single row of eight events can"))))
+
 (deftest rows-still-arriving-are-not-a-staleness-finding
   (let [fresh (fn [rows since] (with-recent (kaiyu/section win rows since) 3 2))
         d (dx/diagnose (-> (report {:live-since "2026-08-01"})
