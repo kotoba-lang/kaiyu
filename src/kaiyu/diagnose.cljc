@@ -218,6 +218,40 @@
             :else nil)))
         sections))
 
+(defn- row-volume
+  "How many events the rows stand for, not how many groups they fall into.
+
+  Rows are grouped: `{:route \"home\" :bucket \"lt10\" :count 1}` is one row
+  standing for one visit, and `{:from \"home\" :to \"chat\" :count 8}` is one
+  row standing for eight. Counting rows calls those the same evidence. Falls
+  back to the row count for a shape carrying no `:count`, which is the most
+  that can honestly be assumed about rows this does not recognise."
+  [rows]
+  (let [counts (keep :count rows)]
+    (if (seq counts) (reduce + counts) (count rows))))
+
+(defn- can-detect-silence?
+  "Whether 0 rows in `trailing` would be surprising for a section of this volume.
+
+  A section's own rate over the window predicts `volume × trailing/window` rows
+  in the trailing span. Below one, zero is the EXPECTED observation and carries
+  no information — and the rule would go on reporting it every day, because a
+  single old row can never re-enter the trailing span. A test that can only
+  ever fire discriminates nothing.
+
+  Measured 2026-08-29 on shinshi.club: `dwell` held ONE row in seven days,
+  predicting 0.43 in three, and was reported `:high` 『stopped』 against a
+  witness whose ratio to it had not changed — one dwell per five visits over
+  the window, zero per four over the span.
+
+  Stated as `volume × trailing ≥ window` so the arithmetic is integer and
+  identical on both platforms; the ratio form differs between Clojure and
+  ClojureScript in the type it produces, and this is a boundary."
+  [volume window trailing]
+  (let [w (:days window) t (:days trailing)]
+    (boolean (and (number? w) (pos? w) (number? t)
+                  (>= (* volume t) w)))))
+
 (defn- stale-sections
   "Sections holding rows in the window but none in its trailing span.
 
@@ -232,7 +266,8 @@
                           (zero? (:rows recent))
                           (some? collected-since)
                           (neg? (compare collected-since (:from trailing))))
-                 {:section k :collected-since collected-since :rows (count rows)})))
+                 {:section k :collected-since collected-since :rows (count rows)
+                  :volume (row-volume rows)})))
        (sort-by (comp name :section))
        vec))
 
@@ -278,6 +313,13 @@
         (cond
           (empty? stale) []
 
+          ;; The floor guards only this reading. It asserts that this section
+          ;; ALONE went quiet, which requires that the section was previously
+          ;; loud enough for quiet to be visible. `collection-stopped` below
+          ;; draws on every section at once and already says counts cannot
+          ;; separate a dead collector from a quiet site, so a per-section
+          ;; floor there would only weaken evidence that is stronger for being
+          ;; an ensemble.
           fresh
           (mapv (fn [{:keys [section collected-since rows]}]
                   (finding (keyword "kaiyu.measurement"
@@ -295,7 +337,7 @@
                             :witness (:section fresh) :witness-recent-rows (:rows fresh)
                             :window window}
                            [section]))
-                stale)
+                (filterv #(can-detect-silence? (:volume %) window trailing) stale))
 
           :else
           [(finding :kaiyu.measurement/collection-stopped
