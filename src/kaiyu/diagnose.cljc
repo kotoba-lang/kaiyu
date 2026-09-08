@@ -73,7 +73,7 @@
   here: gating on `:measured` would silence three of four live sites until each
   accumulates a full window, and choosing silence over a caveated number is a
   product decision, not a library one."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kaiyu.core :as kaiyu]))
 
 (def severities

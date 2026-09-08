@@ -1,6 +1,6 @@
 (ns kaiyu.diagnose-test
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kaiyu.core :as kaiyu]
             [kaiyu.diagnose :as dx]))
 
