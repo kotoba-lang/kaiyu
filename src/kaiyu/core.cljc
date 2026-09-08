@@ -38,7 +38,7 @@
   Both had already duplicated the bucket boundaries, the whitelist-not-sanitize
   rule and the window arithmetic; the third consumer is what makes the
   duplication worth removing rather than worth watching."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ───────────────────────────── dwell ─────────────────────────────
 
@@ -101,12 +101,12 @@
   visit even when the ad was posted on a social network, because the question
   the bucket answers is 『どこに払ったか』."
   [{:keys [campaign? referrer-host own-hosts]}]
-  (let [host (some-> referrer-host str str/lower-case str/trim not-empty)
+  (let [host (some-> referrer-host str str/lower str/trim not-empty)
         has? (fn [fragments] (boolean (some #(str/includes? host %) fragments)))]
     (cond
       campaign? "campaign"
       (nil? host) "direct"
-      (some #(str/includes? host (str/lower-case %)) (or own-hosts [])) "direct"
+      (some #(str/includes? host (str/lower %)) (or own-hosts [])) "direct"
       (has? search-hosts) "search"
       (has? social-hosts) "social"
       :else "referral")))
@@ -137,7 +137,7 @@
   is why this takes the vocabulary as an argument instead of reading it from
   the payload."
   [vocabulary route]
-  (let [s (some-> route str str/lower-case str/trim)]
+  (let [s (some-> route str str/lower str/trim)]
     (cond
       (or (nil? s) (str/blank? s) (= s "/") (= s home-route)) home-route
       (contains? (set vocabulary) s) s
