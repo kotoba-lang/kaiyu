@@ -144,7 +144,7 @@ window arithmetic. The third consumer is what made the duplication worth
 removing rather than worth watching — `com-junkawasaki/root` ADR-2608060900
 said to wait for exactly that.
 
-Their shipped vocabularies are checked into `test/kaiyu/core_test.cljc` as
+Their shipped vocabularies are checked into `test/kaiyu/core_test.cljk` as
 fixtures, so a change here that would alter either site's numbers fails loudly
 instead of being discovered when two products stop being comparable.
 
@@ -163,6 +163,6 @@ instead of being discovered when two products stop being comparable.
 ## Tests
 
 ```bash
-npx nbb --classpath src:test test/run_tests.cljs   # 31 tests / 140 assertions
+npx nbb --classpath src:test test/run_tests.cljs.cljk   # 31 tests / 140 assertions
 clojure -M:test                                    # same suite on the JVM
 ```
